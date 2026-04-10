@@ -2,10 +2,10 @@
 
 A screen activity observer that watches your screen, understands what you're
 doing, and stores it in a format any LLM agent can browse like a codebase.
-The agent is the search engine — it reads the index, navigates to what it
-needs, and pulls full content on demand. No embeddings, no ranked results.
+The agent is the search engine it reads the index, navigates to what it
+needs, and pulls full content on demand. Kind of like the way it would explore a codebase. 
 
-See [`screen-memory-v1-spec.md`](./screen-memory-v1-spec.md) for the full design.
+Screen data is deeply undervalued and we are creating the infra to leverage it. This is v1. 
 
 ## Quick start
 
