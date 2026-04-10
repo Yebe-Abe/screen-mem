@@ -95,6 +95,20 @@ export function createVlmClient(config: Config): VlmClient {
 
       if (!response.ok) {
         const text = await response.text().catch(() => "");
+        if (response.status === 404) {
+          throw new Error(
+            `VLM model not found on Fireworks: '${config.fireworksVlmModel}'. ` +
+              `Set FIREWORKS_VLM_MODEL to a model id your account can access. ` +
+              `Run: curl -s https://api.fireworks.ai/inference/v1/models ` +
+              `-H "Authorization: Bearer $FIREWORKS_API_KEY" | jq '.data[].id' ` +
+              `to list available models. (raw: ${text.slice(0, 200)})`
+          );
+        }
+        if (response.status === 401 || response.status === 403) {
+          throw new Error(
+            `VLM auth failed (HTTP ${response.status}) — check FIREWORKS_API_KEY. (raw: ${text.slice(0, 200)})`
+          );
+        }
         throw new Error(
           `VLM HTTP ${response.status}: ${text.slice(0, 500) || "(no body)"}`
         );

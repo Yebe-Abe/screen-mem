@@ -89,11 +89,11 @@ export function loadConfig(): Config {
     ),
     fireworksVlmModel: envStr(
       "FIREWORKS_VLM_MODEL",
-      "accounts/fireworks/models/qwen2p5-vl-32b-instruct"
+      "accounts/fireworks/models/qwen3p6-plus"
     ),
     fireworksTextModel: envStr(
       "FIREWORKS_TEXT_MODEL",
-      "accounts/fireworks/models/qwen3-235b-a22b-instruct-2507"
+      "accounts/fireworks/models/qwen3p6-plus"
     ),
   };
 }

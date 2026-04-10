@@ -95,8 +95,8 @@ Environment variables (sensible defaults for everything but the API key):
 | `SCREEN_MEMORY_IDLE_TIMEOUT_CLIPS` | `5` |
 | `SCREEN_MEMORY_BACKLOG_CEILING` | `60` |
 | `SCREEN_MEMORY_CAPTURE_INPUT` | `1:none` (macOS), `desktop` (Windows), `$DISPLAY` (Linux) |
-| `FIREWORKS_VLM_MODEL` | `accounts/fireworks/models/qwen2p5-vl-32b-instruct` |
-| `FIREWORKS_TEXT_MODEL` | `accounts/fireworks/models/qwen3-235b-a22b-instruct-2507` |
+| `FIREWORKS_VLM_MODEL` | `accounts/fireworks/models/qwen3p6-plus` |
+| `FIREWORKS_TEXT_MODEL` | `accounts/fireworks/models/qwen3p6-plus` |
 | `SCREEN_MEMORY_LOG_LEVEL` | `info` |
 
 ## Architecture

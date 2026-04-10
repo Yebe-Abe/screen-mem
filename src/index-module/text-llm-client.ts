@@ -72,6 +72,13 @@ export function createTextLlmClient(config: Config): TextLlmClient {
         });
         if (!response.ok) {
           const text = await response.text().catch(() => "");
+          if (response.status === 404) {
+            throw new Error(
+              `text LLM model not found on Fireworks: '${config.fireworksTextModel}'. ` +
+                `Set FIREWORKS_TEXT_MODEL to a model id your account can access. ` +
+                `(raw: ${text.slice(0, 200)})`
+            );
+          }
           throw new Error(
             `text LLM HTTP ${response.status}: ${text.slice(0, 300) || "(no body)"}`
           );
