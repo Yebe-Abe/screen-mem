@@ -68,11 +68,16 @@ export function createScreenCapture(config: Config): ScreenCapture {
 
   return {
     async recordClip(outputPath: string, durationSec: number): Promise<void> {
+      // ffmpeg writes the MP4 incrementally over the full clip duration —
+      // if the processor scans staging mid-recording it'll see a half-written
+      // file with no moov atom and Fireworks will reject it. Write to a
+      // .partial path so the processor's "*.mp4" filename matcher can't see
+      // the file until ffmpeg has finished and we rename atomically.
+      const partialPath = `${outputPath}.partial`;
       const args = [
         ...inputArgs,
         "-t",
         String(durationSec),
-        // libx264 baseline gives a small file the VLM API will accept
         "-c:v",
         "libx264",
         "-pix_fmt",
@@ -80,9 +85,19 @@ export function createScreenCapture(config: Config): ScreenCapture {
         "-preset",
         "ultrafast",
         "-y",
-        outputPath,
+        partialPath,
       ];
-      await runFfmpeg(args, { stderrTag: "record" });
+      try {
+        await runFfmpeg(args, { stderrTag: "record" });
+        await fs.rename(partialPath, outputPath);
+      } catch (err) {
+        // Best-effort cleanup of the partial file on failure so it doesn't
+        // accumulate. The processor would ignore it anyway, but tidy up.
+        await fs.unlink(partialPath).catch(() => {
+          /* ignore */
+        });
+        throw err;
+      }
     },
 
     async captureFrameBytes(): Promise<Buffer> {

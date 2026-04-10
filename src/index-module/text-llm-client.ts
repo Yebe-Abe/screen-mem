@@ -11,10 +11,8 @@ import type { Config } from "../config.js";
 import { createLogger } from "../logging.js";
 import type { WallClockDelta } from "../types.js";
 import {
-  DAY_SUMMARY_SYSTEM_PROMPT,
-  SESSION_CLOSE_SYSTEM_PROMPT,
-  buildDaySummaryUserMessage,
-  buildSessionCloseUserMessage,
+  buildDaySummaryPrompt,
+  buildSessionClosePrompt,
 } from "./prompts.js";
 
 const log = createLogger("index:text-llm");
@@ -42,19 +40,14 @@ const MAX_ATTEMPTS = 3;
 const INITIAL_BACKOFF_MS = 500;
 
 export function createTextLlmClient(config: Config): TextLlmClient {
-  async function callChat(
-    systemPrompt: string,
-    userMessage: string,
-    label: string
-  ): Promise<string> {
+  async function callChat(prompt: string, label: string): Promise<string> {
+    // Match the validated single-user-message format used by the VLM client.
+    // qwen3p6-plus returns empty content when given a separate system role.
     const body = {
       model: config.fireworksTextModel,
       max_tokens: 512,
       temperature: 0.3,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage },
-      ],
+      messages: [{ role: "user", content: prompt }],
     };
     const url = `${config.fireworksBaseUrl}/chat/completions`;
 
@@ -89,7 +82,9 @@ export function createTextLlmClient(config: Config): TextLlmClient {
         }
         const content = json.choices?.[0]?.message?.content;
         if (typeof content !== "string" || !content.trim()) {
-          throw new Error("text LLM returned empty content");
+          throw new Error(
+            `text LLM returned empty content. Full response: ${JSON.stringify(json).slice(0, 1000)}`
+          );
         }
         return firstLine(content.trim());
       } catch (err) {
@@ -113,16 +108,12 @@ export function createTextLlmClient(config: Config): TextLlmClient {
 
   return {
     async summarizeSession(startHHMM, endHHMM, deltas): Promise<string> {
-      const userMessage = buildSessionCloseUserMessage(
-        startHHMM,
-        endHHMM,
-        deltas
-      );
-      return callChat(SESSION_CLOSE_SYSTEM_PROMPT, userMessage, "session-close");
+      const prompt = buildSessionClosePrompt(startHHMM, endHHMM, deltas);
+      return callChat(prompt, "session-close");
     },
     async summarizeDay(ymd, sessionLines): Promise<string> {
-      const userMessage = buildDaySummaryUserMessage(ymd, sessionLines);
-      return callChat(DAY_SUMMARY_SYSTEM_PROMPT, userMessage, "day-summary");
+      const prompt = buildDaySummaryPrompt(ymd, sessionLines);
+      return callChat(prompt, "day-summary");
     },
   };
 }

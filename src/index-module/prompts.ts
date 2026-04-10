@@ -1,11 +1,13 @@
 // Prompts for the VLM (per-clip) and the text LLM (session close + day summary).
-// Lifted directly from the spec — these are the validated versions. Treating
-// them as constants here keeps the call sites obvious and makes future tweaks
-// easy to review.
+//
+// IMPORTANT: qwen3p6-plus on Fireworks does not reliably handle a separate
+// `system` role message — it returns empty content. The validated format
+// (test_vlm.py) sends the whole prompt (instructions + per-call context) as
+// a single `user` message text block. We mirror that exactly here.
 
 import type { WallClockDelta } from "../types.js";
 
-export const VLM_SYSTEM_PROMPT = `You are a screen activity observer. You watch short video clips of a user's screen and produce structured observations.
+const VLM_INSTRUCTIONS = `You are a screen activity observer. You watch short video clips of a user's screen and produce structured observations.
 
 You will receive:
 - A ~1 minute video clip of the user's screen
@@ -51,20 +53,24 @@ DELTAS:
 [MM:SS] delta description
 KEY_FRAMES: MM:SS, MM:SS | none`;
 
-/** Build the per-clip user message that goes alongside the video input. */
-export function buildVlmUserContext(
+/**
+ * Build the full per-clip prompt: instructions + the "Current session" /
+ * "Last deltas" trailer that test_vlm.py uses. Returned as a single string
+ * that goes into a single `user` message alongside the video.
+ */
+export function buildVlmPrompt(
   workingDescription: string | null,
   lastDeltas: readonly WallClockDelta[]
 ): string {
   const sessionLine = workingDescription ?? "no active session";
   const deltasLine =
     lastDeltas.length === 0
-      ? "(none)"
+      ? "(none — fresh start)"
       : lastDeltas.map((d) => `[${d.time}] ${d.text}`).join("\n");
-  return `Current session: ${sessionLine}\nLast deltas:\n${deltasLine}`;
+  return `${VLM_INSTRUCTIONS}\n\n---\nCurrent session: ${sessionLine}\nLast deltas: ${deltasLine}`;
 }
 
-export const SESSION_CLOSE_SYSTEM_PROMPT = `You are summarizing an activity session. You will receive timestamped deltas from a user's screen activity session.
+const SESSION_CLOSE_INSTRUCTIONS = `You are summarizing an activity session. You will receive timestamped deltas from a user's screen activity session.
 
 Write a single-line session description that captures:
 - What the user was doing (the activity, not the apps)
@@ -86,16 +92,16 @@ Format: [START–END] description
 
 Respond with exactly one line — the session description — and nothing else.`;
 
-export function buildSessionCloseUserMessage(
+export function buildSessionClosePrompt(
   startHHMM: string,
   endHHMM: string,
   deltas: readonly WallClockDelta[]
 ): string {
-  const lines = deltas.map((d) => `[${d.time}] ${d.text}`).join("\n");
-  return `Session window: [${startHHMM}–${endHHMM}]\n\nDELTAS:\n${lines}`;
+  const deltaLines = deltas.map((d) => `[${d.time}] ${d.text}`).join("\n");
+  return `${SESSION_CLOSE_INSTRUCTIONS}\n\n---\nSession window: [${startHHMM}–${endHHMM}]\n\nDELTAS:\n${deltaLines}`;
 }
 
-export const DAY_SUMMARY_SYSTEM_PROMPT = `You are summarizing a day of activity. You will receive session descriptions from a user's day.
+const DAY_SUMMARY_INSTRUCTIONS = `You are summarizing a day of activity. You will receive session descriptions from a user's day.
 
 Write a single-line day summary. Group related sessions. Mention the most important topics, projects, and people. Include total session count.
 
@@ -107,9 +113,9 @@ BAD:
 
 Respond with exactly one line — the day summary — and nothing else.`;
 
-export function buildDaySummaryUserMessage(
+export function buildDaySummaryPrompt(
   ymd: string,
   sessionLines: readonly string[]
 ): string {
-  return `Date: ${ymd}\n\nSESSIONS:\n${sessionLines.join("\n")}`;
+  return `${DAY_SUMMARY_INSTRUCTIONS}\n\n---\nDate: ${ymd}\n\nSESSIONS:\n${sessionLines.join("\n")}`;
 }

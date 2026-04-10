@@ -11,10 +11,7 @@ import * as fs from "node:fs/promises";
 import type { Config } from "../config.js";
 import { createLogger } from "../logging.js";
 import type { WallClockDelta } from "../types.js";
-import {
-  VLM_SYSTEM_PROMPT,
-  buildVlmUserContext,
-} from "./prompts.js";
+import { buildVlmPrompt } from "./prompts.js";
 
 const log = createLogger("index:vlm-client");
 
@@ -47,14 +44,16 @@ export function createVlmClient(config: Config): VlmClient {
       const bytes = await fs.readFile(clipPath);
       const base64 = bytes.toString("base64");
       const dataUrl = `data:video/mp4;base64,${base64}`;
-      const userContext = buildVlmUserContext(workingDescription, lastDeltas);
+      const prompt = buildVlmPrompt(workingDescription, lastDeltas);
 
+      // Match the validated test_vlm.py request shape exactly:
+      // single `user` message containing [video_url, text]. qwen3p6-plus
+      // returns empty content if a separate `system` role is used.
       const body = {
         model: config.fireworksVlmModel,
         max_tokens: 2048,
         temperature: 0.2,
         messages: [
-          { role: "system", content: VLM_SYSTEM_PROMPT },
           {
             role: "user",
             content: [
@@ -64,7 +63,7 @@ export function createVlmClient(config: Config): VlmClient {
               },
               {
                 type: "text",
-                text: userContext,
+                text: prompt,
               },
             ],
           },
@@ -120,7 +119,11 @@ export function createVlmClient(config: Config): VlmClient {
       }
       const content = json.choices?.[0]?.message?.content;
       if (typeof content !== "string" || !content.trim()) {
-        throw new Error("VLM returned empty content");
+        // Surface the full response so we can see what the API actually
+        // returned (different field name, content filter, finish_reason, etc.)
+        throw new Error(
+          `VLM returned empty content. Full response: ${JSON.stringify(json).slice(0, 1500)}`
+        );
       }
       return content;
     },
