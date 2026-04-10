@@ -1,11 +1,19 @@
 // vlm_client capability — HTTP I/O to Fireworks for the per-clip VLM call.
 // Reads the clip from disk, base64-encodes it as a data URL, and posts to
-// the OpenAI-compatible chat completions endpoint. Returns the raw text the
-// model produced (the parser handles structure).
+// the OpenAI-compatible chat completions endpoint as a streaming request.
+// Returns the accumulated content text the model produced (the parser
+// handles structure).
 //
-// Retry policy: the orchestrator owns retry counts and decides when to give
-// up. The client itself does no retries — a single failure throws and the
-// orchestrator either re-queues or drops the clip.
+// Why streaming: qwen3p6-plus is a reasoning model whose chain-of-thought
+// can run thousands of tokens per call. Fireworks caps non-streaming
+// chat completions at max_tokens=4096 and we observed the model hitting
+// that ceiling mid-thought (`finish_reason=length`, `content=null`,
+// `reasoning_content` ~16k chars). Streaming removes the cap and lets us
+// budget the full reasoning trace + final content.
+//
+// Retry policy: the orchestrator owns retry counts and decides when to
+// give up. The client itself does no retries — a single failure throws
+// and the orchestrator either re-queues or drops the clip.
 
 import * as fs from "node:fs/promises";
 import type { Config } from "../config.js";
@@ -27,11 +35,22 @@ export interface VlmClient {
   ): Promise<string>;
 }
 
-interface ChatCompletionResponse {
+/** One Server-Sent Events chunk from a streaming chat completion. */
+interface ChatCompletionChunk {
   choices?: Array<{
-    message?: { content?: string };
+    delta?: {
+      content?: string | null;
+      reasoning_content?: string | null;
+    };
+    finish_reason?: string | null;
   }>;
   error?: { message?: string };
+}
+
+interface StreamResult {
+  content: string;
+  reasoningChars: number;
+  finishReason: string | null;
 }
 
 export function createVlmClient(config: Config): VlmClient {
@@ -46,13 +65,19 @@ export function createVlmClient(config: Config): VlmClient {
       const dataUrl = `data:video/mp4;base64,${base64}`;
       const prompt = buildVlmPrompt(workingDescription, lastDeltas);
 
-      // Match the validated test_vlm.py request shape exactly:
-      // single `user` message containing [video_url, text]. qwen3p6-plus
-      // returns empty content if a separate `system` role is used.
+      // Match the validated test_vlm.py request shape: single `user`
+      // message containing [video_url, text]. qwen3p6-plus returns empty
+      // content if a separate `system` role is used.
+      //
+      // Streaming + a generous max_tokens budget. The model emits its
+      // chain-of-thought to delta.reasoning_content first, then the final
+      // structured response to delta.content. We accumulate both and use
+      // delta.content as the answer.
       const body = {
         model: config.fireworksVlmModel,
-        max_tokens: 2048,
+        max_tokens: 16384,
         temperature: 0.2,
+        stream: true,
         messages: [
           {
             role: "user",
@@ -71,7 +96,7 @@ export function createVlmClient(config: Config): VlmClient {
       };
 
       const url = `${config.fireworksBaseUrl}/chat/completions`;
-      log.debug("calling VLM", {
+      log.debug("calling VLM (streaming)", {
         clipPath,
         bytes: bytes.length,
         model: config.fireworksVlmModel,
@@ -84,7 +109,7 @@ export function createVlmClient(config: Config): VlmClient {
           headers: {
             Authorization: `Bearer ${config.fireworksApiKey}`,
             "Content-Type": "application/json",
-            Accept: "application/json",
+            Accept: "text/event-stream",
           },
           body: JSON.stringify(body),
         });
@@ -113,19 +138,93 @@ export function createVlmClient(config: Config): VlmClient {
         );
       }
 
-      const json = (await response.json()) as ChatCompletionResponse;
-      if (json.error?.message) {
-        throw new Error(`VLM API error: ${json.error.message}`);
+      if (!response.body) {
+        throw new Error("VLM streaming response had no body");
       }
-      const content = json.choices?.[0]?.message?.content;
-      if (typeof content !== "string" || !content.trim()) {
-        // Surface the full response so we can see what the API actually
-        // returned (different field name, content filter, finish_reason, etc.)
+
+      const result = await consumeChatStream(response.body);
+
+      if (!result.content.trim()) {
         throw new Error(
-          `VLM returned empty content. Full response: ${JSON.stringify(json).slice(0, 1500)}`
+          `VLM returned empty content via stream (finish_reason=${result.finishReason ?? "unknown"}, ` +
+            `reasoning_content=${result.reasoningChars} chars). ` +
+            `Either max_tokens (currently 16384) is still too low, the stream was cut short, ` +
+            `or the model produced reasoning but no final answer.`
         );
       }
-      return content;
+      return result.content;
     },
   };
+}
+
+/**
+ * Consume an OpenAI-compatible Server-Sent Events stream and accumulate the
+ * content text. Tolerates the optional `reasoning_content` field used by
+ * Qwen reasoning models on Fireworks. Returns once the stream ends or
+ * `data: [DONE]` is received.
+ */
+async function consumeChatStream(
+  body: ReadableStream<Uint8Array>
+): Promise<StreamResult> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+  let reasoningChars = 0;
+  let finishReason: string | null = null;
+  let streamError: string | null = null;
+  let done = false;
+
+  try {
+    while (!done) {
+      const { done: streamDone, value } = await reader.read();
+      if (streamDone) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Process complete lines from the SSE stream. Lines are terminated by
+      // \n; data fields look like "data: {...}" or "data: [DONE]".
+      let newlineIdx: number;
+      while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
+        const rawLine = buffer.slice(0, newlineIdx);
+        buffer = buffer.slice(newlineIdx + 1);
+        const line = rawLine.replace(/\r$/, "").trim();
+        if (!line) continue;
+        if (line.startsWith(":")) continue; // SSE comment
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") {
+          done = true;
+          break;
+        }
+        try {
+          const chunk = JSON.parse(data) as ChatCompletionChunk;
+          if (chunk.error?.message) {
+            streamError = chunk.error.message;
+            done = true;
+            break;
+          }
+          const choice = chunk.choices?.[0];
+          const delta = choice?.delta;
+          if (typeof delta?.content === "string") {
+            content += delta.content;
+          }
+          if (typeof delta?.reasoning_content === "string") {
+            reasoningChars += delta.reasoning_content.length;
+          }
+          if (choice?.finish_reason) {
+            finishReason = choice.finish_reason;
+          }
+        } catch {
+          // Malformed chunk — skip; the rest of the stream may still be valid
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (streamError) {
+    throw new Error(`VLM stream error: ${streamError}`);
+  }
+  return { content, reasoningChars, finishReason };
 }

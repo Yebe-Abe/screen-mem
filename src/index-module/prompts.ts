@@ -4,6 +4,12 @@
 // `system` role message — it returns empty content. The validated format
 // (test_vlm.py) sends the whole prompt (instructions + per-call context) as
 // a single `user` message text block. We mirror that exactly here.
+//
+// qwen3p6-plus is also a reasoning model: it emits chain-of-thought to a
+// separate `reasoning_content` field before producing the final `content`.
+// We let thinking happen (it improves output quality) and just give the
+// model enough max_tokens for thinking + content both to fit. See the
+// max_tokens settings in vlm-client.ts and text-llm-client.ts.
 
 import type { WallClockDelta } from "../types.js";
 

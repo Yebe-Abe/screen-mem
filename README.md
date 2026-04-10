@@ -30,6 +30,36 @@ fully quit the terminal app (Cmd+Q, not just close the window) and relaunch
 before running `screen-mem` again — the permission only takes effect for new
 processes.
 
+### Replay / test against existing clips
+
+If you already have video clips and want to validate the pipeline against them
+(or backfill the index without re-recording), drop them into the staging
+directory with the right filename and run `process`:
+
+```bash
+# Filename must be 'clip-HH-MM.mp4' — the HH-MM is the wall-clock time the
+# deltas will be timestamped with.
+cp my-recording.mp4 ~/.screen-memory/staging/clip-09-00.mp4
+cp my-recording-2.mp4 ~/.screen-memory/staging/clip-09-01.mp4
+
+screen-mem process    # runs only the index pipeline; exits when staging is empty
+```
+
+Results land under `~/context/<today>/`. Refuses to run if `screen-mem start`
+is already going (otherwise the two would race on the same staging files).
+
+For large backfills, add `--parallel N` to issue multiple VLM calls
+concurrently within a chronological window:
+
+```bash
+screen-mem process --parallel 5    # ~3-4x speedup over serial on most workloads
+```
+
+The trade-off: clips after a mid-window session boundary may have a slightly
+less accurate continuity verdict (their VLM call was issued against the
+previous session's context); their deltas still land correctly. Don't use
+`--parallel` for live recording — there's no benefit.
+
 ### Find your screen capture device (if the default doesn't work)
 
 `screen-mem` defaults to avfoundation device `1:none` on macOS, which is the

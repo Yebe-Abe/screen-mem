@@ -31,8 +31,13 @@ export interface TextLlmClient {
 
 interface ChatCompletionResponse {
   choices?: Array<{
-    message?: { content?: string };
+    finish_reason?: string;
+    message?: {
+      content?: string | null;
+      reasoning_content?: string | null;
+    };
   }>;
+  usage?: { total_tokens?: number };
   error?: { message?: string };
 }
 
@@ -41,11 +46,15 @@ const INITIAL_BACKOFF_MS = 500;
 
 export function createTextLlmClient(config: Config): TextLlmClient {
   async function callChat(prompt: string, label: string): Promise<string> {
-    // Match the validated single-user-message format used by the VLM client.
-    // qwen3p6-plus returns empty content when given a separate system role.
+    // Match the validated single-user-message format used by the VLM client
+    // (qwen3p6-plus returns empty content when given a separate system role).
+    //
+    // Thinking is intentionally enabled — it improves output quality. The
+    // model emits chain-of-thought to a separate reasoning_content field,
+    // then the final answer to content. max_tokens is generous so both fit.
     const body = {
       model: config.fireworksTextModel,
-      max_tokens: 512,
+      max_tokens: 4096,
       temperature: 0.3,
       messages: [{ role: "user", content: prompt }],
     };
@@ -82,8 +91,14 @@ export function createTextLlmClient(config: Config): TextLlmClient {
         }
         const content = json.choices?.[0]?.message?.content;
         if (typeof content !== "string" || !content.trim()) {
+          const finishReason = json.choices?.[0]?.finish_reason ?? "unknown";
+          const reasoningLen =
+            json.choices?.[0]?.message?.reasoning_content?.length ?? 0;
+          const totalTokens = json.usage?.total_tokens ?? "unknown";
           throw new Error(
-            `text LLM returned empty content. Full response: ${JSON.stringify(json).slice(0, 1000)}`
+            `text LLM returned empty content (finish_reason=${finishReason}, ` +
+              `reasoning_content=${reasoningLen} chars, total_tokens=${totalTokens}). ` +
+              `Likely max_tokens too low for thinking trace + content.`
           );
         }
         return firstLine(content.trim());

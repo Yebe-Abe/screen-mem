@@ -15,6 +15,7 @@ import { createLogger } from "../logging.js";
 import type {
   ContentDispatcher,
   KeyFrameWork,
+  ParsedVlmResponse,
   StagingItem,
   WallClockDelta,
 } from "../types.js";
@@ -40,6 +41,22 @@ export interface IndexOrchestratorDeps {
   textLlmClient?: TextLlmClient;
   sessionWriter?: SessionWriter;
   contentDispatcher: ContentDispatcher;
+  /**
+   * Number of VLM calls to issue concurrently within a polling window.
+   * Default 1 (serial). Values > 1 enable windowed parallel processing:
+   * the next N clips are pre-fetched in parallel against a single snapshot
+   * of session state, then folded sequentially in chronological order.
+   * Trade-off: clips after a mid-window continuity flip see slightly stale
+   * context. Acceptable for batch backfill via `screen-mem process`; leave
+   * at 1 for live recording (clips arrive ~60s apart anyway, no benefit).
+   */
+  parallel?: number;
+}
+
+/** Result of a VLM call, ready to be folded into session state. */
+interface ClipVlmResult {
+  parsed: ParsedVlmResponse;
+  wallClockDeltas: WallClockDelta[];
 }
 
 export interface IndexOrchestrator {
@@ -47,6 +64,12 @@ export interface IndexOrchestrator {
   stop(): void;
   /** Run a single poll cycle synchronously. Useful for tests + clean shutdown. */
   drainOnce(): Promise<void>;
+  /**
+   * Close any active session, generating its summary and updating the map.
+   * Called automatically by start() at shutdown; the `process` subcommand
+   * calls it explicitly after draining staging.
+   */
+  finalize(): Promise<void>;
 }
 
 export function createIndexOrchestrator(
@@ -57,6 +80,7 @@ export function createIndexOrchestrator(
   const text = deps.textLlmClient ?? createTextLlmClient(config);
   const writer = deps.sessionWriter ?? createSessionWriter();
   const dispatcher = deps.contentDispatcher;
+  const parallel = Math.max(1, Math.floor(deps.parallel ?? 1));
 
   let activeSession: Session | null = null;
   let activeSessionDir: string | null = null;
@@ -155,11 +179,17 @@ export function createIndexOrchestrator(
     activeSessionDir = null;
   }
 
-  async function processClip(item: StagingItem): Promise<void> {
-    if (!currentDate || nextSessionId === null) {
-      throw new Error("orchestrator state not initialized");
-    }
-
+  /**
+   * Phase 1 of clip processing: capture the current session snapshot, call
+   * the VLM, parse the response, convert clip-relative offsets to wall-clock.
+   * Pure I/O — does NOT mutate session state.
+   *
+   * The synchronous prefix (workingDescription + lastDeltas reads) runs to
+   * completion before the first await, which is what makes parallel
+   * pre-fetching safe: multiple `callVlmForClip` calls issued back-to-back
+   * all observe the same `activeSession` state.
+   */
+  async function callVlmForClip(item: StagingItem): Promise<ClipVlmResult> {
     const workingDescription = activeSession?.workingDescription ?? null;
     const lastDeltas = activeSession?.lastDeltas() ?? [];
 
@@ -170,6 +200,24 @@ export function createIndexOrchestrator(
       time: offsetToWallClock(item.hour, item.minute, d.offset),
       text: d.text,
     }));
+
+    return { parsed, wallClockDeltas };
+  }
+
+  /**
+   * Phase 2 of clip processing: fold a pre-fetched VLM result into session
+   * state. Runs sequentially (mutates `activeSession`, writes files,
+   * dispatches key frames). Safe to call back-to-back; the parallel path
+   * relies on this being the only state-mutating step.
+   */
+  async function applyClipResult(
+    item: StagingItem,
+    result: ClipVlmResult
+  ): Promise<void> {
+    if (!currentDate || nextSessionId === null) {
+      throw new Error("orchestrator state not initialized");
+    }
+    const { parsed, wallClockDeltas } = result;
 
     // Continuity handling
     let effectiveContinuity = parsed.continuity;
@@ -252,6 +300,12 @@ export function createIndexOrchestrator(
     }
   }
 
+  /** Sequential composition of the two phases — used by the serial path. */
+  async function processClip(item: StagingItem): Promise<void> {
+    const result = await callVlmForClip(item);
+    await applyClipResult(item, result);
+  }
+
   async function processIdle(item: StagingItem): Promise<void> {
     if (!activeSession || !activeSessionDir) {
       // No active session to mark idle. Just discard the marker.
@@ -307,6 +361,15 @@ export function createIndexOrchestrator(
   async function pollOnce(): Promise<void> {
     await refreshDate();
     const items = await listStagingItems();
+    if (items.length === 0) return;
+    if (parallel === 1) {
+      await processItemsSerial(items);
+    } else {
+      await processItemsParallel(items);
+    }
+  }
+
+  async function processItemsSerial(items: StagingItem[]): Promise<void> {
     for (const item of items) {
       try {
         await processItem(item);
@@ -335,6 +398,93 @@ export function createIndexOrchestrator(
     }
   }
 
+  /**
+   * Windowed parallel processing path. For each window of `parallel` items
+   * (in chronological order), pre-fetch the VLM call for every clip in
+   * parallel, then walk the window in chronological order folding the
+   * results into session state sequentially.
+   *
+   * Trade-off: clips whose VLM call resolved before a mid-window continuity
+   * flip see slightly stale context (their VLM call was issued against the
+   * previous session's working description and last deltas). Their deltas
+   * still land correctly via the existing fallback `if (activeSession ===
+   * null) effectiveContinuity = "new"`, but their continuity verdict may be
+   * inaccurate, causing minor session-boundary drift. For batch backfill
+   * via `screen-mem process` this is acceptable; for live recording leave
+   * `parallel` at 1.
+   *
+   * Unlike the serial path, this does NOT early-return on a per-item
+   * failure. The serial path's early return exists to avoid spinning on a
+   * broken first item across poll cycles. In parallel mode, the rest of the
+   * window's VLM calls have already been issued (in flight or completed),
+   * so consuming them is strictly cheaper than dead-lettering the work.
+   * Failed items still dead-letter via the existing retry counter after
+   * MAX_RETRIES_PER_CLIP attempts spread across windows.
+   */
+  async function processItemsParallel(items: StagingItem[]): Promise<void> {
+    type Settled = { result: ClipVlmResult } | { error: Error };
+
+    let idx = 0;
+    while (idx < items.length) {
+      const window = items.slice(idx, idx + parallel);
+      log.info("draining window", {
+        size: window.length,
+        idxStart: idx,
+        total: items.length,
+      });
+
+      // Pre-fetch VLM calls for every clip in the window. Idle items don't
+      // make API calls — they're handled inline during the chronological
+      // walk below.
+      const vlmPromises = new Map<string, Promise<Settled>>();
+      for (const item of window) {
+        if (item.kind === "clip") {
+          vlmPromises.set(
+            item.filename,
+            callVlmForClip(item)
+              .then((result): Settled => ({ result }))
+              .catch((error: Error): Settled => ({ error }))
+          );
+        }
+      }
+
+      // Walk the window in chronological order. Idle items process inline,
+      // clip items await their pre-fetched VLM call. Both fold sequentially
+      // into session state.
+      for (const item of window) {
+        try {
+          if (item.kind === "idle") {
+            await processIdle(item);
+          } else {
+            const settled = await vlmPromises.get(item.filename)!;
+            if ("error" in settled) throw settled.error;
+            await applyClipResult(item, settled.result);
+          }
+          await deleteStagingItem(item);
+          retryCounts.delete(item.filename);
+        } catch (err) {
+          const count = (retryCounts.get(item.filename) ?? 0) + 1;
+          retryCounts.set(item.filename, count);
+          log.warn("processing failed", {
+            filename: item.filename,
+            attempt: count,
+            error: (err as Error).message,
+          });
+          if (count >= MAX_RETRIES_PER_CLIP) {
+            log.error("giving up on item after max retries", {
+              filename: item.filename,
+            });
+            await deleteStagingItem(item);
+            retryCounts.delete(item.filename);
+          }
+          // Note: NO early return — keep processing the rest of the window.
+        }
+      }
+
+      idx += window.length;
+    }
+  }
+
   return {
     async start(): Promise<void> {
       if (running) return;
@@ -359,14 +509,7 @@ export function createIndexOrchestrator(
       } catch {
         /* best effort */
       }
-      // Close any still-open session on shutdown
-      if (activeSession) {
-        await closeActiveSession().catch((err) => {
-          log.error("failed to close active session on shutdown", {
-            error: (err as Error).message,
-          });
-        });
-      }
+      await finalizeImpl();
       log.info("index orchestrator stopped");
     },
 
@@ -375,7 +518,18 @@ export function createIndexOrchestrator(
     },
 
     drainOnce: pollOnce,
+    finalize: finalizeImpl,
   };
+
+  async function finalizeImpl(): Promise<void> {
+    if (activeSession) {
+      await closeActiveSession().catch((err) => {
+        log.error("failed to close active session in finalize", {
+          error: (err as Error).message,
+        });
+      });
+    }
+  }
 }
 
 function stripLeadingBracket(s: string): string {

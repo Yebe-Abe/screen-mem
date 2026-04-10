@@ -84,6 +84,12 @@ export function createScreenCapture(config: Config): ScreenCapture {
         "yuv420p",
         "-preset",
         "ultrafast",
+        // Force the mp4 muxer explicitly. ffmpeg normally infers it from the
+        // output filename extension, but our partial-write filename ends in
+        // ".partial", which it doesn't recognize. Without -f mp4 it errors:
+        // "Unable to choose an output format for '...mp4.partial'".
+        "-f",
+        "mp4",
         "-y",
         partialPath,
       ];

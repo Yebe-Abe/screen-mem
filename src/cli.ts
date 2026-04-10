@@ -12,9 +12,11 @@ import { loadConfig, type Config } from "./config.js";
 import { createContentDispatcher } from "./content/orchestrator.js";
 import { createIndexOrchestrator } from "./index-module/orchestrator.js";
 import { createLogger } from "./logging.js";
+import { createBacklogMonitor } from "./recorder/backlog-monitor.js";
 import { createRecorder } from "./recorder/orchestrator.js";
-import { ensureDir, pathExists, writeFileAtomic } from "./utils/fs.js";
+import { ensureDir, listDir, pathExists, writeFileAtomic } from "./utils/fs.js";
 import { contextReadmePath } from "./utils/paths.js";
+import { parseStagingFilename } from "./utils/timestamps.js";
 
 const log = createLogger("cli");
 
@@ -157,6 +159,134 @@ async function commandStart(): Promise<void> {
   log.info("screen-mem stopped");
 }
 
+/**
+ * Parse `--parallel N` (or `--parallel=N`) from a flag list. Returns 1 if
+ * absent or invalid. The flag is process-subcommand-scoped — main()'s
+ * dispatcher doesn't see flags, this is parsed locally.
+ */
+function parseParallelFlag(argv: string[]): number {
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "--parallel" && i + 1 < argv.length) {
+      const n = Number(argv[i + 1]);
+      return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
+    }
+    if (a.startsWith("--parallel=")) {
+      const n = Number(a.slice("--parallel=".length));
+      return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
+    }
+  }
+  return 1;
+}
+
+async function commandProcess(): Promise<void> {
+  const config = loadConfig();
+  const parallel = parseParallelFlag(process.argv.slice(3));
+
+  // Refuse to run if a `start` instance is alive — they'd race on the same
+  // staging files. The user should `screen-mem stop` first.
+  const existingPid = await readPidFile(config);
+  if (existingPid && isProcessAlive(existingPid)) {
+    console.error(
+      `screen-mem start is running (pid ${existingPid}). Stop it first with 'screen-mem stop'.`
+    );
+    process.exit(1);
+  }
+
+  await ensureDir(config.stagingDir);
+  await ensureDir(config.contextDir);
+  await ensureDir(config.logDir);
+  await seedContextReadme(config);
+
+  if (parallel > 1) {
+    log.info("parallel mode enabled", { parallel });
+  }
+
+  const dispatcher = createContentDispatcher(config);
+  const indexOrch = createIndexOrchestrator(config, {
+    contentDispatcher: dispatcher,
+    parallel,
+  });
+  // Backlog monitor with no ceiling — only used here for its count() method.
+  const backlog = createBacklogMonitor(
+    config.stagingDir,
+    Number.POSITIVE_INFINITY
+  );
+
+  let stopping = false;
+  const shutdown = (signal: NodeJS.Signals): void => {
+    if (stopping) return;
+    stopping = true;
+    log.info("shutdown signal received during process", { signal });
+    indexOrch.stop();
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  log.info("processing existing staging items", {
+    stagingDir: config.stagingDir,
+  });
+
+  // Sanity check before draining: warn loudly about any files in staging
+  // that don't match the expected filename pattern. Otherwise the drain
+  // loop would silently exit with "staging drained" even though the user
+  // has dozens of files sitting there with non-matching names.
+  const allFiles = await listDir(config.stagingDir);
+  const ignored = allFiles.filter((f) => parseStagingFilename(f) === null);
+  const matched = allFiles.length - ignored.length;
+  if (ignored.length > 0) {
+    log.warn(
+      `${ignored.length} file(s) in staging will be ignored — they don't match 'clip-HH-MM.mp4' or 'idle-HH-MM'`,
+      { examples: ignored.slice(0, 3) }
+    );
+  }
+  if (matched === 0) {
+    log.info(
+      "no matching files in staging — nothing to process. Rename your clips to clip-HH-MM.mp4 (e.g. clip-09-00.mp4, clip-09-01.mp4, ...) and try again."
+    );
+    return;
+  }
+
+  // Drain loop. Each iteration: count → drainOnce → recount. Bail if no
+  // progress for 2 consecutive iterations (means everything left is stuck
+  // and `drainOnce`'s in-process retry counter has dead-lettered it, or it
+  // hits a permanent error).
+  let prevRemaining = -1;
+  let stallIterations = 0;
+  const MAX_STALLS = 2;
+  while (!stopping) {
+    const remaining = await backlog.count();
+    if (remaining === 0) {
+      log.info("staging drained");
+      break;
+    }
+    log.info("draining", { remaining });
+    try {
+      await indexOrch.drainOnce();
+    } catch (err) {
+      log.error("drainOnce failed", { error: (err as Error).message });
+    }
+    const after = await backlog.count();
+    if (after === 0) {
+      log.info("staging drained");
+      break;
+    }
+    if (after >= prevRemaining && prevRemaining !== -1) {
+      stallIterations += 1;
+      if (stallIterations >= MAX_STALLS) {
+        log.warn("no progress in drain loop — giving up", { remaining: after });
+        break;
+      }
+    } else {
+      stallIterations = 0;
+    }
+    prevRemaining = after;
+  }
+
+  await indexOrch.finalize();
+  log.info("process command done");
+}
+
 async function commandStop(): Promise<void> {
   const config = loadConfig();
   const pid = await readPidFile(config);
@@ -238,6 +368,11 @@ function printUsage(): void {
 Commands:
   start    Start recording (foreground; runs until Ctrl+C or 'screen-mem stop')
   stop     Signal a running screen-mem process to shut down
+  process  Run the index pipeline against existing clips in staging, then exit.
+           Drop pre-recorded clips into ~/.screen-memory/staging/ named
+           'clip-HH-MM.mp4' (the HH-MM is the wall-clock time you want on
+           the deltas) and run this to backfill or test without recording.
+           Add '--parallel N' to issue N VLM calls concurrently (default 1).
 
 Environment:
   FIREWORKS_API_KEY              required — your Fireworks API key
@@ -262,6 +397,9 @@ async function main(): Promise<void> {
       return;
     case "stop":
       await commandStop();
+      return;
+    case "process":
+      await commandProcess();
       return;
     case undefined:
     case "-h":
