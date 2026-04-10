@@ -11,17 +11,17 @@ Screen data is deeply undervalued and we are creating the infra to leverage it. 
 
 ```bash
 git clone https://github.com/Yebe-Abe/screen-mem.git && cd screen-mem
-npm install -g .                    # builds + installs the `screen-mem` command
+npm install                                                                                                                                                                                   
 brew install ffmpeg                 # macOS — Linux: apt install ffmpeg
 export FIREWORKS_API_KEY=fw_...     # add this to your shell rc
 
-screen-mem start                    # foreground; Ctrl+C to stop
+./bin/screen-mem.js start                     # foreground; Ctrl+C to stop
 ```
 
 In another terminal at any time:
 
 ```bash
-screen-mem stop                     # graceful shutdown via the PID file
+./bin/screen-mem.js stop                     # graceful shutdown via the PID file
 ```
 
 On the first run on macOS, grant **Screen Recording** permission to your
