@@ -15,26 +15,43 @@ const log = createLogger("recorder:screen-capture");
 /**
  * Build the ffmpeg `-f <fmt> -i <input>` arguments for capturing the primary
  * display on the current OS. The "input" half of the command — output flags
- * are added by the caller.
+ * are added by the caller. The user can override the input target via
+ * `SCREEN_MEMORY_CAPTURE_INPUT` (e.g. set it to "2:none" if their screen is
+ * at avfoundation index 2 instead of the default 1).
  */
-function inputArgsForPlatform(platform: Config["platform"]): string[] {
-  switch (platform) {
+function inputArgsForPlatform(config: Config): string[] {
+  const override = config.captureInput;
+  switch (config.platform) {
     case "darwin":
-      // avfoundation device "1:none" = primary display, no audio. Mac users
-      // may need to grant Screen Recording permission to the terminal.
-      return ["-f", "avfoundation", "-framerate", "10", "-i", "1:none"];
+      // avfoundation default: device index 1, no audio. Run
+      // `ffmpeg -f avfoundation -list_devices true -i ""` to find your
+      // screen's actual index. Mac users must grant Screen Recording
+      // permission to the terminal in System Settings.
+      return [
+        "-f",
+        "avfoundation",
+        "-framerate",
+        "10",
+        "-i",
+        override || "1:none",
+      ];
     case "win32":
-      return ["-f", "gdigrab", "-framerate", "10", "-i", "desktop"];
+      return [
+        "-f",
+        "gdigrab",
+        "-framerate",
+        "10",
+        "-i",
+        override || "desktop",
+      ];
     case "linux":
-      // x11grab is the safest default. Wayland users will need to set
-      // SCREEN_MEMORY_LINUX_DISPLAY or provide an explicit DISPLAY.
       return [
         "-f",
         "x11grab",
         "-framerate",
         "10",
         "-i",
-        process.env.DISPLAY ?? ":0.0",
+        override || process.env.DISPLAY || ":0.0",
       ];
   }
 }
@@ -47,7 +64,7 @@ export interface ScreenCapture {
 }
 
 export function createScreenCapture(config: Config): ScreenCapture {
-  const inputArgs = inputArgsForPlatform(config.platform);
+  const inputArgs = inputArgsForPlatform(config);
 
   return {
     async recordClip(outputPath: string, durationSec: number): Promise<void> {

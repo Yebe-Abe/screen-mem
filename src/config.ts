@@ -20,6 +20,14 @@ export interface Config {
   // Platform
   platform: "darwin" | "win32" | "linux";
 
+  // Screen-capture input override. Empty string means "use the per-OS default":
+  //   darwin → "1:none"      (avfoundation: device index 1, no audio)
+  //   win32  → "desktop"     (gdigrab)
+  //   linux  → $DISPLAY or ":0.0"  (x11grab)
+  // Set this if `ffmpeg -f avfoundation -list_devices true -i ""` shows your
+  // screen at a different index, or if you want to capture a specific display.
+  captureInput: string;
+
   // Fireworks
   fireworksApiKey: string;
   fireworksBaseUrl: string;
@@ -73,6 +81,7 @@ export function loadConfig(): Config {
     idleTimeoutClips: envInt("SCREEN_MEMORY_IDLE_TIMEOUT_CLIPS", 5),
     backlogCeiling: envInt("SCREEN_MEMORY_BACKLOG_CEILING", 60),
     platform: detectPlatform(),
+    captureInput: envStr("SCREEN_MEMORY_CAPTURE_INPUT", ""),
     fireworksApiKey: apiKey,
     fireworksBaseUrl: envStr(
       "FIREWORKS_BASE_URL",

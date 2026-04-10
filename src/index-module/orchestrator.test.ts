@@ -42,6 +42,7 @@ beforeEach(async () => {
     idleTimeoutClips: 5,
     backlogCeiling: 60,
     platform: "linux",
+    captureInput: "",
     fireworksApiKey: "test",
     fireworksBaseUrl: "https://test.invalid",
     fireworksVlmModel: "test-vlm",

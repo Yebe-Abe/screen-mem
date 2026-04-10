@@ -167,15 +167,60 @@ async function commandStop(): Promise<void> {
   if (!isProcessAlive(pid)) {
     console.error(`stale pid file (pid ${pid} not running) — removing`);
     await removePidFile(config);
-    process.exit(1);
+    return;
   }
+
+  // SIGCONT first in case the process was Ctrl+Z'd — a suspended process
+  // can't handle SIGINT until it's resumed.
   try {
-    process.kill(pid, "SIGINT");
-    console.error(`sent SIGINT to pid ${pid}`);
-  } catch (err) {
-    console.error(`failed to signal pid ${pid}: ${(err as Error).message}`);
-    process.exit(1);
+    process.kill(pid, "SIGCONT");
+  } catch {
+    /* best effort */
   }
+
+  // Graceful → SIGTERM → SIGKILL escalation. Anyone running `stop` wants the
+  // process gone; this guarantees it.
+  if (await sendAndWait(pid, "SIGINT", 5_000)) {
+    console.error(`pid ${pid} exited cleanly`);
+    await removePidFile(config);
+    return;
+  }
+  console.error(`pid ${pid} did not exit on SIGINT, escalating to SIGTERM`);
+  if (await sendAndWait(pid, "SIGTERM", 3_000)) {
+    console.error(`pid ${pid} exited on SIGTERM`);
+    await removePidFile(config);
+    return;
+  }
+  console.error(`pid ${pid} ignored SIGTERM, sending SIGKILL`);
+  if (await sendAndWait(pid, "SIGKILL", 2_000)) {
+    console.error(`pid ${pid} killed`);
+    await removePidFile(config);
+    return;
+  }
+  console.error(
+    `failed to kill pid ${pid} — try 'kill -9 ${pid}' manually, then remove ${pidFilePath(config)}`
+  );
+  process.exit(1);
+}
+
+async function sendAndWait(
+  pid: number,
+  signal: NodeJS.Signals,
+  timeoutMs: number
+): Promise<boolean> {
+  try {
+    process.kill(pid, signal);
+  } catch (err) {
+    // ESRCH means the process is already gone, which is success for us
+    if ((err as NodeJS.ErrnoException).code === "ESRCH") return true;
+    return false;
+  }
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (!isProcessAlive(pid)) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -202,6 +247,8 @@ Environment:
   SCREEN_MEMORY_POLL_INTERVAL_MS default 30000
   SCREEN_MEMORY_IDLE_TIMEOUT_CLIPS default 5
   SCREEN_MEMORY_BACKLOG_CEILING  default 60
+  SCREEN_MEMORY_CAPTURE_INPUT    override the ffmpeg capture input
+                                 (e.g. '2:none' on macOS if your screen is at avfoundation index 2)
   FIREWORKS_VLM_MODEL            override the default VLM model id
   FIREWORKS_TEXT_MODEL           override the default text LLM model id
 `);

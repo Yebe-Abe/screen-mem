@@ -26,7 +26,48 @@ In another terminal at any time:
 
 On the first run on macOS, grant **Screen Recording** permission to your
 terminal in *System Settings → Privacy & Security → Screen Recording*, then
-restart `screen-mem`.
+fully quit the terminal app (Cmd+Q, not just close the window) and relaunch
+before running `screen-mem` again — the permission only takes effect for new
+processes.
+
+### Find your screen capture device (if the default doesn't work)
+
+`screen-mem` defaults to avfoundation device `1:none` on macOS, which is the
+right index on most Macs but not all. If you see ffmpeg errors like
+`Error opening input file 1:none` after granting Screen Recording permission,
+list your actual devices:
+
+```bash
+ffmpeg -f avfoundation -list_devices true -i "" 2>&1 | grep -E "AVFoundation|Capture"
+```
+
+Example output on a Mac with an iPhone connected via Continuity Camera:
+
+```
+[AVFoundation indev @ ...] AVFoundation video devices:
+[AVFoundation indev @ ...] [0] FaceTime HD Camera
+[AVFoundation indev @ ...] [1] iPhone Camera
+[AVFoundation indev @ ...] [2] iPhone Desk View Camera
+[AVFoundation indev @ ...] [3] Capture screen 0
+```
+
+The number in brackets next to "Capture screen 0" is what you want. In this
+example the screen is at index 3, so:
+
+```bash
+export SCREEN_MEMORY_CAPTURE_INPUT="3:none"
+screen-mem start
+```
+
+You can sanity-check that ffmpeg can actually capture (this also confirms the
+Screen Recording permission is working):
+
+```bash
+ffmpeg -f avfoundation -framerate 10 -i 3:none -t 2 -y /tmp/test.mp4
+open /tmp/test.mp4
+```
+
+If that produces a 2-second video of your screen, `screen-mem` will work too.
 
 Recording is written to `~/context/`. Point any LLM agent at that directory
 and let it read files — start with `~/context/<year>/<month>/map.txt`.
@@ -53,6 +94,7 @@ Environment variables (sensible defaults for everything but the API key):
 | `SCREEN_MEMORY_POLL_INTERVAL_MS` | `30000` |
 | `SCREEN_MEMORY_IDLE_TIMEOUT_CLIPS` | `5` |
 | `SCREEN_MEMORY_BACKLOG_CEILING` | `60` |
+| `SCREEN_MEMORY_CAPTURE_INPUT` | `1:none` (macOS), `desktop` (Windows), `$DISPLAY` (Linux) |
 | `FIREWORKS_VLM_MODEL` | `accounts/fireworks/models/qwen2p5-vl-32b-instruct` |
 | `FIREWORKS_TEXT_MODEL` | `accounts/fireworks/models/qwen3-235b-a22b-instruct-2507` |
 | `SCREEN_MEMORY_LOG_LEVEL` | `info` |
