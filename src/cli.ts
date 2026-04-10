@@ -113,7 +113,7 @@ async function commandStart(): Promise<void> {
   const existingPid = await readPidFile(config);
   if (existingPid && isProcessAlive(existingPid)) {
     console.error(
-      `screen-memory is already running (pid ${existingPid}). Use 'screen-memory stop' first.`
+      `screen-mem is already running (pid ${existingPid}). Use 'screen-mem stop' first.`
     );
     process.exit(1);
   }
@@ -141,7 +141,7 @@ async function commandStart(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  log.info("screen-memory starting", {
+  log.info("screen-mem starting", {
     contextDir: config.contextDir,
     stagingDir: config.stagingDir,
   });
@@ -154,14 +154,14 @@ async function commandStart(): Promise<void> {
     await removePidFile(config);
   }
 
-  log.info("screen-memory stopped");
+  log.info("screen-mem stopped");
 }
 
 async function commandStop(): Promise<void> {
   const config = loadConfig();
   const pid = await readPidFile(config);
   if (!pid) {
-    console.error("screen-memory is not running (no pid file)");
+    console.error("screen-mem is not running (no pid file)");
     process.exit(1);
   }
   if (!isProcessAlive(pid)) {
@@ -188,11 +188,11 @@ function isProcessAlive(pid: number): boolean {
 }
 
 function printUsage(): void {
-  console.error(`usage: screen-memory <command>
+  console.error(`usage: screen-mem <command>
 
 Commands:
-  start    Start recording (foreground; runs until Ctrl+C or 'screen-memory stop')
-  stop     Signal a running screen-memory process to shut down
+  start    Start recording (foreground; runs until Ctrl+C or 'screen-mem stop')
+  stop     Signal a running screen-mem process to shut down
 
 Environment:
   FIREWORKS_API_KEY              required — your Fireworks API key

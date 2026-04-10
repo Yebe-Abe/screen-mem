@@ -4,13 +4,19 @@
   "description": "A screen activity observer that records, understands, and indexes what you're doing for any LLM agent to browse.",
   "type": "module",
   "bin": {
-    "screen-memory": "./bin/screen-memory.js"
+    "screen-mem": "./bin/screen-mem.js"
   },
+  "files": [
+    "bin/",
+    "dist/",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepare": "tsc"
   },
   "engines": {
     "node": ">=20"

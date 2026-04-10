@@ -10,17 +10,23 @@ Screen data is deeply undervalued and we are creating the infra to leverage it. 
 ## Quick start
 
 ```bash
-npm install
-npm run build
-export FIREWORKS_API_KEY=fw_...
-./bin/screen-memory.js start    # foreground; Ctrl+C to stop
+git clone <repo> screen-mem && cd screen-mem
+npm install -g .                    # builds + installs the `screen-mem` command
+brew install ffmpeg                 # macOS — Linux: apt install ffmpeg
+export FIREWORKS_API_KEY=fw_...     # add this to your shell rc
+
+screen-mem start                    # foreground; Ctrl+C to stop
 ```
 
-In another terminal:
+In another terminal at any time:
 
 ```bash
-./bin/screen-memory.js stop     # graceful shutdown via the PID file
+screen-mem stop                     # graceful shutdown via the PID file
 ```
+
+On the first run on macOS, grant **Screen Recording** permission to your
+terminal in *System Settings → Privacy & Security → Screen Recording*, then
+restart `screen-mem`.
 
 Recording is written to `~/context/`. Point any LLM agent at that directory
 and let it read files — start with `~/context/<year>/<month>/map.txt`.
