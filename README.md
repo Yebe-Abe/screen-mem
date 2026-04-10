@@ -10,7 +10,7 @@ Screen data is deeply undervalued and we are creating the infra to leverage it. 
 ## Quick start
 
 ```bash
-git clone https://github.com/Yebe-Abe/screen-mem.git screen-mem && cd screen-mem
+git clone https://github.com/Yebe-Abe/screen-mem.git && cd screen-mem
 npm install -g .                    # builds + installs the `screen-mem` command
 brew install ffmpeg                 # macOS — Linux: apt install ffmpeg
 export FIREWORKS_API_KEY=fw_...     # add this to your shell rc
