@@ -1,11 +1,8 @@
 # screen-memory
 
-A screen activity observer that watches your screen, understands what you're
-doing, and stores it in a format any LLM agent can browse like a codebase.
-The agent is the search engine it reads the index, navigates to what it
-needs, and pulls full content on demand. Kind of like the way it would explore a codebase. 
+V0.5 of a local screen recorder that pulls out the relevant info using an open-source model, stores the high signal data, and creates a browsable filesystem on your local machine so that you can point your AI agent to the file system and ask it anything about what you have been doing. 
 
-Screen data is deeply undervalued and we are creating the infra to leverage it. This is v1. 
+There is a lot of signal that can be derived from your screen data and it seems like it is under utilized. 
 
 ## Quick start
 
