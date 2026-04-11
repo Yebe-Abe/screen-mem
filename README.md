@@ -124,7 +124,7 @@ Environment variables (sensible defaults for everything but the API key):
 | `SCREEN_MEMORY_POLL_INTERVAL_MS` | `30000` |
 | `SCREEN_MEMORY_IDLE_TIMEOUT_CLIPS` | `5` |
 | `SCREEN_MEMORY_BACKLOG_CEILING` | `60` |
-| `SCREEN_MEMORY_CAPTURE_INPUT` | `1:none` (macOS), `desktop` (Windows), `$DISPLAY` (Linux) |
+| `SCREEN_MEMORY_CAPTURE_INPUT` | `1:none` (macOS), [soon to support] `desktop` (Windows), `$DISPLAY` (Linux) |
 | `FIREWORKS_VLM_MODEL` | `accounts/fireworks/models/qwen3p6-plus` |
 | `FIREWORKS_TEXT_MODEL` | `accounts/fireworks/models/qwen3p6-plus` |
 | `SCREEN_MEMORY_LOG_LEVEL` | `info` |
