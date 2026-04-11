@@ -7,9 +7,23 @@
 // session description / map line is missing — deltas are still on disk and
 // can be regenerated later).
 
+// text_llm_client capability — HTTP I/O to Fireworks for session-close and
+// day-summary calls. Uses the same OpenAI-compatible chat completions
+// endpoint as the VLM client but with text-only input.
+//
+// Like the VLM client, we stream. qwen3p6-plus is a reasoning model, and
+// without streaming + a large max_tokens budget, the thinking trace for
+// day-summary (which has to digest the whole day's session descriptions)
+// reliably eats the entire non-streaming 4096 cap and returns empty content.
+//
+// Retry policy: 3 attempts with exponential backoff. The caller decides
+// what to do if we still fail — typically log + accept that the session
+// description / map line is missing; the deltas are on disk regardless.
+
 import type { Config } from "../config.js";
 import { createLogger } from "../logging.js";
 import type { WallClockDelta } from "../types.js";
+import { consumeChatStream } from "./chat-stream.js";
 import {
   buildDaySummaryPrompt,
   buildSessionClosePrompt,
@@ -29,33 +43,23 @@ export interface TextLlmClient {
   summarizeDay(ymd: string, sessionLines: readonly string[]): Promise<string>;
 }
 
-interface ChatCompletionResponse {
-  choices?: Array<{
-    finish_reason?: string;
-    message?: {
-      content?: string | null;
-      reasoning_content?: string | null;
-    };
-  }>;
-  usage?: { total_tokens?: number };
-  error?: { message?: string };
-}
-
 const MAX_ATTEMPTS = 3;
 const INITIAL_BACKOFF_MS = 500;
 
 export function createTextLlmClient(config: Config): TextLlmClient {
   async function callChat(prompt: string, label: string): Promise<string> {
-    // Match the validated single-user-message format used by the VLM client
-    // (qwen3p6-plus returns empty content when given a separate system role).
+    // Match the validated single-user-message format used by the VLM client.
+    // qwen3p6-plus returns empty content when given a separate system role.
     //
-    // Thinking is intentionally enabled — it improves output quality. The
-    // model emits chain-of-thought to a separate reasoning_content field,
-    // then the final answer to content. max_tokens is generous so both fit.
+    // Streaming + a generous max_tokens budget. The model emits chain-of-
+    // thought to delta.reasoning_content first, then the final summary to
+    // delta.content. We accumulate both via the shared SSE helper and use
+    // delta.content as the answer.
     const body = {
       model: config.fireworksTextModel,
-      max_tokens: 4096,
+      max_tokens: 16384,
       temperature: 0.3,
+      stream: true,
       messages: [{ role: "user", content: prompt }],
     };
     const url = `${config.fireworksBaseUrl}/chat/completions`;
@@ -68,7 +72,7 @@ export function createTextLlmClient(config: Config): TextLlmClient {
           headers: {
             Authorization: `Bearer ${config.fireworksApiKey}`,
             "Content-Type": "application/json",
-            Accept: "application/json",
+            Accept: "text/event-stream",
           },
           body: JSON.stringify(body),
         });
@@ -85,23 +89,19 @@ export function createTextLlmClient(config: Config): TextLlmClient {
             `text LLM HTTP ${response.status}: ${text.slice(0, 300) || "(no body)"}`
           );
         }
-        const json = (await response.json()) as ChatCompletionResponse;
-        if (json.error?.message) {
-          throw new Error(`text LLM API error: ${json.error.message}`);
+        if (!response.body) {
+          throw new Error("text LLM streaming response had no body");
         }
-        const content = json.choices?.[0]?.message?.content;
-        if (typeof content !== "string" || !content.trim()) {
-          const finishReason = json.choices?.[0]?.finish_reason ?? "unknown";
-          const reasoningLen =
-            json.choices?.[0]?.message?.reasoning_content?.length ?? 0;
-          const totalTokens = json.usage?.total_tokens ?? "unknown";
+
+        const result = await consumeChatStream(response.body);
+        if (!result.content.trim()) {
           throw new Error(
-            `text LLM returned empty content (finish_reason=${finishReason}, ` +
-              `reasoning_content=${reasoningLen} chars, total_tokens=${totalTokens}). ` +
-              `Likely max_tokens too low for thinking trace + content.`
+            `text LLM returned empty content via stream (finish_reason=${result.finishReason ?? "unknown"}, ` +
+              `reasoning_content=${result.reasoningChars} chars). ` +
+              `max_tokens (currently 16384) may still be too low, or the stream was cut short.`
           );
         }
-        return firstLine(content.trim());
+        return firstLine(result.content.trim());
       } catch (err) {
         lastErr = err as Error;
         if (attempt < MAX_ATTEMPTS) {

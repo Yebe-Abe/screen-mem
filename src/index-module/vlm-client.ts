@@ -19,6 +19,7 @@ import * as fs from "node:fs/promises";
 import type { Config } from "../config.js";
 import { createLogger } from "../logging.js";
 import type { WallClockDelta } from "../types.js";
+import { consumeChatStream } from "./chat-stream.js";
 import { buildVlmPrompt } from "./prompts.js";
 
 const log = createLogger("index:vlm-client");
@@ -33,24 +34,6 @@ export interface VlmClient {
     workingDescription: string | null,
     lastDeltas: readonly WallClockDelta[]
   ): Promise<string>;
-}
-
-/** One Server-Sent Events chunk from a streaming chat completion. */
-interface ChatCompletionChunk {
-  choices?: Array<{
-    delta?: {
-      content?: string | null;
-      reasoning_content?: string | null;
-    };
-    finish_reason?: string | null;
-  }>;
-  error?: { message?: string };
-}
-
-interface StreamResult {
-  content: string;
-  reasoningChars: number;
-  finishReason: string | null;
 }
 
 export function createVlmClient(config: Config): VlmClient {
@@ -155,76 +138,4 @@ export function createVlmClient(config: Config): VlmClient {
       return result.content;
     },
   };
-}
-
-/**
- * Consume an OpenAI-compatible Server-Sent Events stream and accumulate the
- * content text. Tolerates the optional `reasoning_content` field used by
- * Qwen reasoning models on Fireworks. Returns once the stream ends or
- * `data: [DONE]` is received.
- */
-async function consumeChatStream(
-  body: ReadableStream<Uint8Array>
-): Promise<StreamResult> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let content = "";
-  let reasoningChars = 0;
-  let finishReason: string | null = null;
-  let streamError: string | null = null;
-  let done = false;
-
-  try {
-    while (!done) {
-      const { done: streamDone, value } = await reader.read();
-      if (streamDone) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      // Process complete lines from the SSE stream. Lines are terminated by
-      // \n; data fields look like "data: {...}" or "data: [DONE]".
-      let newlineIdx: number;
-      while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
-        const rawLine = buffer.slice(0, newlineIdx);
-        buffer = buffer.slice(newlineIdx + 1);
-        const line = rawLine.replace(/\r$/, "").trim();
-        if (!line) continue;
-        if (line.startsWith(":")) continue; // SSE comment
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-        if (data === "[DONE]") {
-          done = true;
-          break;
-        }
-        try {
-          const chunk = JSON.parse(data) as ChatCompletionChunk;
-          if (chunk.error?.message) {
-            streamError = chunk.error.message;
-            done = true;
-            break;
-          }
-          const choice = chunk.choices?.[0];
-          const delta = choice?.delta;
-          if (typeof delta?.content === "string") {
-            content += delta.content;
-          }
-          if (typeof delta?.reasoning_content === "string") {
-            reasoningChars += delta.reasoning_content.length;
-          }
-          if (choice?.finish_reason) {
-            finishReason = choice.finish_reason;
-          }
-        } catch {
-          // Malformed chunk — skip; the rest of the stream may still be valid
-        }
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  if (streamError) {
-    throw new Error(`VLM stream error: ${streamError}`);
-  }
-  return { content, reasoningChars, finishReason };
 }
